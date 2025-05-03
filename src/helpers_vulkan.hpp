@@ -1,4 +1,5 @@
 
+#pragma once
 #include <vector>
 #include <ranges>
 #include "Exception.hpp"
@@ -46,7 +47,7 @@ namespace helpers
                 if (not std::ranges::contains(availableExtensionProps, std::string_view(requiredExtension), [](vk::ExtensionProperties const &extensionProp)
                                               { return std::string_view(extensionProp.extensionName); }))
                 {
-                    throw Core::runtime_error("Required Instance Extension:\"{}\" not found", std::string(requiredExtension));
+                    throw Core::runtime_error("Required Instance Extension:\"{}\" not found", requiredExtension);
                 }
             }
 
@@ -56,7 +57,7 @@ namespace helpers
                 if (not std::ranges::contains(availableLayerProps, std::string_view(requiredLayer), [](vk::LayerProperties const &layerProp)
                                               { return std::string_view(layerProp.layerName); }))
                 {
-                    throw Core::runtime_error("Required Instance Layer:\"{}\" not found", std::string(requiredLayer));
+                    throw Core::runtime_error("Required Instance Layer:\"{}\" not found", requiredLayer);
                 }
             }
 
@@ -85,6 +86,90 @@ namespace helpers
             vk::Instance vkInstance = vk::createInstance(instanceCreateInfo);
             VULKAN_HPP_DEFAULT_DISPATCHER.init(vkInstance);
             return vkInstance;
+        }
+
+        struct DeviceQueueSelection
+        {
+            vk::PhysicalDevice physicalDevice;
+            uint32_t queueFamilyIndex;
+        };
+
+        DeviceQueueSelection getFirstSupportedDeviceQueueSelection(vk::Instance instance, vk::PhysicalDeviceType physicalDeviceType, vk::QueueFlags requiredFlags, std::optional<vk::SurfaceKHR> surface = std::nullopt)
+        {
+            auto physicalDevices = instance.enumeratePhysicalDevices();
+            for (auto physicalDevice : instance.enumeratePhysicalDevices())
+            {
+                if (physicalDevice.getProperties().deviceType != physicalDeviceType)
+                    continue;
+
+                auto queueProperties = physicalDevice.getQueueFamilyProperties();
+                for (uint32_t queueFamilyIndex = 0; auto queueProp : queueProperties)
+                {
+                    if (queueProp.queueFlags & requiredFlags)
+                    {
+                        bool surfacePresentSupport = surface.transform([&](vk::SurfaceKHR surface)
+                                                                       { return physicalDevice.getSurfaceSupportKHR(queueFamilyIndex, surface); })
+                                                         .value_or(true);
+                        if (surfacePresentSupport)
+                            return DeviceQueueSelection{
+                                physicalDevice, queueFamilyIndex};
+                    }
+                    queueFamilyIndex++;
+                }
+            }
+
+            throw Core::runtime_error("no physical device and queue combination found!");
+        }
+
+        vk::Device create_device(DeviceQueueSelection deviceQueue, std::vector<const char *> requiredDeviceExtensions, std::vector<const char *> requiredDeviceLayers)
+        {
+            std::vector<vk::ExtensionProperties> availableExtensionProps = deviceQueue.physicalDevice.enumerateDeviceExtensionProperties();
+            for (const char *requiredExtension : requiredDeviceExtensions)
+            {
+                if (not std::ranges::contains(availableExtensionProps, std::string_view(requiredExtension), [](vk::ExtensionProperties const &extensionProp)
+                                              { return std::string_view(extensionProp.extensionName); }))
+                {
+                    throw Core::runtime_error("Required Device Extension:\"{}\" not found", requiredExtension);
+                }
+            }
+
+            std::vector<vk::LayerProperties> availableLayersProps = deviceQueue.physicalDevice.enumerateDeviceLayerProperties();
+            for (const char *requiredLayer : requiredDeviceLayers)
+            {
+                if (not std::ranges::contains(availableExtensionProps, std::string_view(requiredLayer), [](vk::ExtensionProperties const &layerProp)
+                                              { return std::string_view(layerProp.extensionName); }))
+                {
+                    throw Core::runtime_error("Required Device Layer:\"{}\" not found", requiredLayer);
+                }
+            }
+
+            float queuePriority = 1.0f;
+            vk::DeviceQueueCreateInfo queueCreateInfo{
+                .queueFamilyIndex = deviceQueue.queueFamilyIndex,
+                .queueCount = 1,
+                .pQueuePriorities = &queuePriority};
+            vk::DeviceCreateInfo deviceCreateInfo{
+                .queueCreateInfoCount = 1,
+                .pQueueCreateInfos = &queueCreateInfo,
+                .enabledLayerCount = (uint32_t)requiredDeviceLayers.size(),
+                .ppEnabledLayerNames = requiredDeviceLayers.data(),
+                .enabledExtensionCount = (uint32_t)requiredDeviceExtensions.size(),
+                .ppEnabledExtensionNames = requiredDeviceExtensions.data()};
+            vk::Device device = deviceQueue.physicalDevice.createDevice(deviceCreateInfo);
+            VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
+            return device;
+        }
+
+        std::optional<vk::SurfaceFormatKHR> getSurfaceFormat(vk::PhysicalDevice physicalDevice, vk::SurfaceKHR surface, vk::Format format)
+        {
+            auto supportedSurfaceFormats = physicalDevice.getSurfaceFormatsKHR(surface);
+            auto it = std::ranges::find_if(supportedSurfaceFormats, [&](vk::SurfaceFormatKHR &surfaceFormat)
+                                           { return surfaceFormat.format == format; });
+            if (it == supportedSurfaceFormats.end())
+            {
+                return std::nullopt;
+            }
+            return *it;
         }
     }
 }

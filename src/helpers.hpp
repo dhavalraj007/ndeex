@@ -1,5 +1,7 @@
+#pragma once
 #include <utility>
 #include "helpers_vulkan.hpp"
+#include "Exception.hpp"
 namespace helpers
 {
     namespace detail
@@ -23,4 +25,19 @@ namespace helpers
         static_assert(sizeof(T) == 0, "Type is:");
     }
 
+    namespace detail
+    {
+        template <typename T>
+            requires std::is_convertible_v<T &&, bool>
+        decltype(auto) SDL_CHECKTHROW_impl(const char *expressionStr, T &&expression)
+        {
+            if (!expression)
+            {
+                throw Core::runtime_error("SDL function :{} failed! SDL_GetError():{}", expressionStr, SDL_GetError());
+            }
+            return std::forward<T>(expression);
+        }
+    }
+
 }
+#define SDL_CHECKTHROW(expression) helpers::detail::SDL_CHECKTHROW_impl(#expression, expression)

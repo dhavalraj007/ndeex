@@ -2,8 +2,12 @@
 
 #include <Windows.h>
 #include "Vulkan.hpp"
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
 #include "Exception.hpp"
+#include <expected>
+#include "helpers.hpp"
 
 namespace Core
 {
@@ -13,43 +17,79 @@ namespace Core
         uint32_t height;
         std::string title;
     };
+
     class Window
     {
     public:
-        Window(WindowCreateInfo wci) : windowCreateInfo(wci)
+        Window(WindowCreateInfo wci) : info(wci), closeRequested(false)
         {
-            if (!glfwInit())
-            {
-                char const *errString;
-                int errCode = glfwGetError(&errString);
-                throw std::runtime_error{errString};
-            }
-            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-            window = glfwCreateWindow(windowCreateInfo.width, windowCreateInfo.height, windowCreateInfo.title.c_str(), nullptr, nullptr);
+            SDL_CHECKTHROW(SDL_Init(SDL_INIT_VIDEO));
+
+            window = SDL_CHECKTHROW(SDL_CreateWindow(info.title.c_str(), info.width, info.height, SDL_WINDOW_VULKAN));
+            SDL_CHECKTHROW(SDL_SetWindowResizable(window, true));
         }
 
         ~Window()
         {
-            glfwDestroyWindow(window);
-            glfwTerminate();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
         }
 
-        bool closeRequested()
+        bool isCloseRequested()
         {
-            return glfwWindowShouldClose(window);
+            return closeRequested;
         }
 
         void clearScreen()
         {
         }
 
-        void pollAndrocessEvents() const
+        SDL_Event *pollAndProcessEvent()
         {
-            glfwPollEvents();
+            static SDL_Event event;
+            if (SDL_PollEvent(&event))
+            {
+                processEvent(&event);
+                return &event;
+            }
+            return nullptr;
+        }
+
+        void processEvent(SDL_Event *event)
+        {
+            switch (event->type)
+            {
+            case SDL_EVENT_QUIT:
+                closeRequested = true;
+                break;
+            case SDL_EVENT_WINDOW_RESIZED:
+                info.width = event->window.data1;
+                info.height = event->window.data2;
+                break;
+            }
+        }
+
+        VkSurfaceKHR createSurface(vk::Instance vkInstance)
+        {
+            VkSurfaceKHR surface;
+            SDL_CHECKTHROW(SDL_Vulkan_CreateSurface(window, vkInstance, nullptr, &surface));
+            return surface;
+        }
+
+        WindowCreateInfo const &getInfo()
+        {
+            return info;
+        }
+
+        void setExtent(uint32_t width, uint32_t height)
+        {
+            info.width = width;
+            info.height = height;
         }
 
     private:
-        WindowCreateInfo windowCreateInfo;
-        GLFWwindow *window;
+        WindowCreateInfo info;
+        SDL_Window *window;
+        bool closeRequested;
     };
 }
