@@ -1,6 +1,7 @@
 #include "Engine.hpp"
 #include "helpers_vulkan.hpp"
 #include <cstring>
+#include <optional>
 #include <span>
 
 namespace Core
@@ -49,7 +50,7 @@ void Engine::initSwapchain()
 {
     vk::Format requiredFormat = vk::Format::eR8G8B8A8Srgb;
     swapchain = Swapchain{physicalDevice, device, surface, requiredFormat};
-    frameDatas = FrameDataContainer(device);
+    renderSyncs = RenderSyncContainer(device);
     swapChainRecreate();
 
     vk::CommandPoolCreateInfo poolInfo{
@@ -157,111 +158,133 @@ Engine::~Engine()
     device.waitIdle();
 }
 
+std::optional<Engine::FrameData> Engine::beginFrame()
+{
+    auto frameIndex = currentFrame % swapchain.size();
+    auto &renderSync = renderSyncs[frameIndex];
+    // wait for previous rendering on the same image be finished
+    if (device.waitForFences(1, &renderSync.fence_RenderFinished.get(), true, 1000) != vk::Result::eSuccess)
+        throw Core::runtime_error("waitForFences failed");
+
+    auto renderTargetIndexResult =
+        swapchain.acquireNextRenderTarget(std::chrono::seconds{5}, renderSync.sem_ImageAcquired.get(), {});
+    if (!renderTargetIndexResult)
+    {
+        swapChainRecreate();
+        return std::nullopt;
+    }
+
+    auto renderTargetIndex = renderTargetIndexResult.value();
+    // std::println("acquired Image index:{}", renderTargetIndex);
+    auto &renderTarget = swapchain.getRenderTarget(renderTargetIndex);
+
+    vk::ImageMemoryBarrier imageBarrier{.srcAccessMask = vk::AccessFlagBits::eNone,
+                                        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                                        .oldLayout = vk::ImageLayout::eUndefined,
+                                        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                                        .srcQueueFamilyIndex = graphicsQueueFamilyIndex,
+                                        .dstQueueFamilyIndex = graphicsQueueFamilyIndex,
+                                        .image = renderTarget.imageHandle,
+                                        .subresourceRange =
+                                            vk::ImageSubresourceRange{.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                                                      .baseMipLevel = 0,
+                                                                      .levelCount = 1,
+                                                                      .baseArrayLayer = 0,
+                                                                      .layerCount = 1}};
+
+    vk::RenderingAttachmentInfo colorAttachment{.imageView = renderTarget.imageView.get(),
+                                                .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                                                .loadOp = vk::AttachmentLoadOp::eClear,
+                                                .storeOp = vk::AttachmentStoreOp::eStore,
+                                                .clearValue =
+                                                    vk::ClearValue{std::array<float, 4>{0.5f, 0.5f, 0.2f, 1.0f}}};
+
+    vk::RenderingInfo renderingInfo{
+        .renderArea = {{0, 0}, {window.getInfo().width, window.getInfo().height}},
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &colorAttachment,
+    };
+
+    auto &commandBuffer = commandBuffers[frameIndex];
+    commandBuffer->reset(vk::CommandBufferResetFlagBits::eReleaseResources);
+    commandBuffer->begin(vk::CommandBufferBeginInfo{});
+
+    commandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                                   vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::DependencyFlagBits{}, nullptr,
+                                   nullptr, {imageBarrier});
+
+    commandBuffer->beginRendering(renderingInfo);
+
+    return FrameData{commandBuffer.get(), renderTarget};
+}
+
+void Engine::endFrame(FrameData &frameData)
+{
+    auto frameIndex = currentFrame % swapchain.size();
+    auto &renderSync = renderSyncs[frameIndex];
+
+    frameData.commandBuffer.endRendering();
+
+    vk::ImageMemoryBarrier presentBarrier{.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+                                          .dstAccessMask = {},
+                                          .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                                          .newLayout = vk::ImageLayout::ePresentSrcKHR,
+                                          .image = frameData.renderTarget.imageHandle,
+                                          .subresourceRange =
+                                              vk::ImageSubresourceRange{.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                                                        .baseMipLevel = 0,
+                                                                        .levelCount = 1,
+                                                                        .baseArrayLayer = 0,
+                                                                        .layerCount = 1}};
+
+    frameData.commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                            vk::PipelineStageFlagBits::eBottomOfPipe, vk::DependencyFlagBits{}, nullptr,
+                                            nullptr, {presentBarrier});
+    frameData.commandBuffer.end();
+
+    vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+    vk::SubmitInfo submitInfo{
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &renderSync.sem_ImageAcquired.get(),
+        .pWaitDstStageMask = &waitStage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &frameData.commandBuffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &renderSync.sem_RenderFinished.get(),
+    };
+
+    if (device.resetFences(1, &renderSync.fence_RenderFinished.get()) != vk::Result::eSuccess)
+        throw Core::runtime_error("failed to reset render fence");
+
+    graphicsQueue.submit(submitInfo, renderSync.fence_RenderFinished.get());
+    swapchain.presentImage(graphicsQueue, frameData.renderTarget.imageIndex, renderSync.sem_RenderFinished.get());
+    currentFrame++;
+}
+
 void Engine::gameloop()
 {
     while (not window.isCloseRequested())
     {
         processEvents();
 
-        auto frameIndex = currentFrame % swapchain.size();
-        auto &frameData = frameDatas[frameIndex];
-        // wait for previous rendering on the same image be finished
-        if (device.waitForFences(1, &frameData.fence_RenderFinished.get(), true, 1000) != vk::Result::eSuccess)
-            throw Core::runtime_error("waitForFences failed");
-
-        auto renderTargetIndexResult =
-            swapchain.acquireNextRenderTarget(std::chrono::seconds{5}, frameData.sem_ImageAcquired.get(), {});
-        if (!renderTargetIndexResult)
-        {
-            swapChainRecreate();
+        auto res = beginFrame();
+        if (!res)
             continue;
-        }
+        auto frameData = res.value();
+        auto &cmd = frameData.commandBuffer;
 
-        auto renderTargetIndex = renderTargetIndexResult.value();
-        // std::println("acquired Image index:{}", renderTargetIndex);
-        auto &renderTarget = swapchain.getRenderTarget(renderTargetIndex);
+        cmd.bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
+        shaderObject.setState(cmd);
+        shaderObject.bind(cmd);
+        cmd.draw(3, 1, 0, 0);
 
-        vk::ImageMemoryBarrier imageBarrier{.srcAccessMask = vk::AccessFlagBits::eNone,
-                                            .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                                            .oldLayout = vk::ImageLayout::eUndefined,
-                                            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                                            .srcQueueFamilyIndex = graphicsQueueFamilyIndex,
-                                            .dstQueueFamilyIndex = graphicsQueueFamilyIndex,
-                                            .image = renderTarget.imageHandle,
-                                            .subresourceRange =
-                                                vk::ImageSubresourceRange{.aspectMask = vk::ImageAspectFlagBits::eColor,
-                                                                          .baseMipLevel = 0,
-                                                                          .levelCount = 1,
-                                                                          .baseArrayLayer = 0,
-                                                                          .layerCount = 1}};
-        vk::ImageMemoryBarrier presentBarrier{
-            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-            .dstAccessMask = {},
-            .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
-            .newLayout = vk::ImageLayout::ePresentSrcKHR,
-            .image = renderTarget.imageHandle,
-            .subresourceRange = vk::ImageSubresourceRange{.aspectMask = vk::ImageAspectFlagBits::eColor,
-                                                          .baseMipLevel = 0,
-                                                          .levelCount = 1,
-                                                          .baseArrayLayer = 0,
-                                                          .layerCount = 1}};
+        cmd.bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
+        shaderObject2.setState(cmd);
+        shaderObject2.bind(cmd);
+        cmd.draw(3, 1, 0, 0);
 
-        vk::RenderingAttachmentInfo colorAttachment{.imageView = renderTarget.imageView.get(),
-                                                    .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
-                                                    .loadOp = vk::AttachmentLoadOp::eClear,
-                                                    .storeOp = vk::AttachmentStoreOp::eStore,
-                                                    .clearValue =
-                                                        vk::ClearValue{std::array<float, 4>{0.5f, 0.5f, 0.2f, 1.0f}}};
-
-        vk::RenderingInfo renderingInfo{
-            .renderArea = {{0, 0}, {window.getInfo().width, window.getInfo().height}},
-            .layerCount = 1,
-            .colorAttachmentCount = 1,
-            .pColorAttachments = &colorAttachment,
-        };
-
-        auto &commandBuffer = commandBuffers[frameIndex];
-        commandBuffer->reset(vk::CommandBufferResetFlagBits::eReleaseResources);
-        commandBuffer->begin(vk::CommandBufferBeginInfo{});
-
-        commandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                                       vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::DependencyFlagBits{},
-                                       nullptr, nullptr, {imageBarrier});
-
-        commandBuffer->beginRendering(renderingInfo);
-        commandBuffer->bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
-        shaderObject.setState(commandBuffer.get());
-        shaderObject.bind(commandBuffer.get());
-        commandBuffer->draw(3, 1, 0, 0);
-
-        commandBuffer->bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
-        shaderObject2.setState(commandBuffer.get());
-        shaderObject2.bind(commandBuffer.get());
-        commandBuffer->draw(3, 1, 0, 0);
-
-        commandBuffer->endRendering();
-        commandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                       vk::PipelineStageFlagBits::eBottomOfPipe, vk::DependencyFlagBits{}, nullptr,
-                                       nullptr, {presentBarrier});
-        commandBuffer->end();
-
-        vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
-        vk::SubmitInfo submitInfo{
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &frameData.sem_ImageAcquired.get(),
-            .pWaitDstStageMask = &waitStage,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer.get(),
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &frameData.sem_RenderFinished.get(),
-        };
-
-        if (device.resetFences(1, &frameData.fence_RenderFinished.get()) != vk::Result::eSuccess)
-            throw Core::runtime_error("failed to reset render fence");
-
-        graphicsQueue.submit(submitInfo, frameData.fence_RenderFinished.get());
-        swapchain.presentImage(graphicsQueue, renderTargetIndex, frameData.sem_RenderFinished.get());
-        currentFrame++;
+        endFrame(frameData);
     }
 }
 
@@ -285,7 +308,7 @@ void Engine::swapChainRecreate()
 {
     swapchain.recreate({window.getInfo().width, window.getInfo().height}, {graphicsQueueFamilyIndex});
     graphicsQueue.waitIdle();
-    frameDatas.recreate(swapchain.size());
+    renderSyncs.recreate(swapchain.size());
 }
 
 void Engine::onWindowResize(uint32_t width, uint32_t height)
@@ -301,7 +324,11 @@ void Engine::onWindowResize(uint32_t width, uint32_t height)
     shaderObject2.setScissor(vk::Rect2D{.offset{.x = 0, .y = 0}, .extent = {.width = width, .height = height}});
 }
 
-void Engine::FrameDataContainer::recreate(const size_t size)
+Engine::RenderSyncContainer::RenderSyncContainer(const vk::Device device) : device(device)
+{
+}
+
+void Engine::RenderSyncContainer::recreate(const size_t size)
 {
     clear();
     for (uint32_t i = 0; i < size; ++i)
@@ -309,10 +336,6 @@ void Engine::FrameDataContainer::recreate(const size_t size)
         emplace_back(device.createSemaphoreUnique({}), device.createSemaphoreUnique({}),
                      device.createFenceUnique(vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled}));
     }
-}
-
-Engine::FrameDataContainer::FrameDataContainer(const vk::Device device) : device(device)
-{
 }
 
 } // namespace Core

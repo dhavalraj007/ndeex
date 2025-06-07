@@ -115,6 +115,7 @@ class Swapchain
             };
 
             // We don't own the raw swapchain images, so just store the handle
+            renderTargets[i].imageIndex = i;
             renderTargets[i].imageHandle = swapchainImages[i];
             renderTargets[i].imageView = device.createImageViewUnique(imageViewCreateInfo);
         }
@@ -124,6 +125,7 @@ class Swapchain
 
     struct RenderTarget
     {
+        uint32_t imageIndex;           // index to the swapchain image
         vk::Image imageHandle;         // Handle to the swapchain image (not owned)
         vk::UniqueImageView imageView; // View into the image
     };

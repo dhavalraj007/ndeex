@@ -27,21 +27,28 @@ class Engine
 
     struct FrameData
     {
+        vk::CommandBuffer commandBuffer;
+        Swapchain::RenderTarget &renderTarget;
+    };
+    std::optional<FrameData> beginFrame();
+    void endFrame(FrameData &frameData);
+
+    struct RenderSync
+    {
         vk::UniqueSemaphore sem_ImageAcquired;
         vk::UniqueSemaphore sem_RenderFinished;
         vk::UniqueFence fence_RenderFinished;
     };
-
-    struct FrameDataContainer : std::vector<FrameData>
+    struct RenderSyncContainer : std::vector<RenderSync>
     {
         vk::Device device;
 
-        FrameDataContainer() = default;
-        explicit FrameDataContainer(const vk::Device device);
-        FrameDataContainer(const FrameDataContainer &) = delete;
-        FrameDataContainer &operator=(const FrameDataContainer &) = delete;
-        FrameDataContainer(FrameDataContainer &&other) = default;
-        FrameDataContainer &operator=(FrameDataContainer &&other) = default;
+        RenderSyncContainer() = default;
+        explicit RenderSyncContainer(const vk::Device device);
+        RenderSyncContainer(const RenderSyncContainer &) = delete;
+        RenderSyncContainer &operator=(const RenderSyncContainer &) = delete;
+        RenderSyncContainer(RenderSyncContainer &&other) = default;
+        RenderSyncContainer &operator=(RenderSyncContainer &&other) = default;
 
         void recreate(const size_t size);
     };
@@ -59,8 +66,7 @@ class Engine
     vk::Device device;
     vk::Queue graphicsQueue;
     Swapchain swapchain;
-    FrameDataContainer frameDatas;
-    // vk::RenderPass renderPass;
+    RenderSyncContainer renderSyncs;
     vk::UniqueCommandPool commandPool;
     std::vector<vk::UniqueCommandBuffer> commandBuffers;
     ShaderObject shaderObject;
