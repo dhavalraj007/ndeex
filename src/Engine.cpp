@@ -8,6 +8,14 @@ namespace Core
 
 Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
 {
+    initCoreHandles();
+    initSwapchain();
+    initVertexBuffer();
+    initShaderObjects();
+}
+
+void Engine::initCoreHandles()
+{
     std::vector<const char *> requiredExtensions;
     requiredExtensions.append_range(window.getRequiredInstanceExtensions());
     vkInstance = helpers::vulkan::create_instance("ndeex", 1, "ndeexEngine", 1, requiredExtensions, {});
@@ -35,7 +43,10 @@ Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
         {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_EXT_SHADER_OBJECT_EXTENSION_NAME},
         {});
     graphicsQueue = device.getQueue(graphicsQueueFamilyIndex, 0);
+}
 
+void Engine::initSwapchain()
+{
     vk::Format requiredFormat = vk::Format::eR8G8B8A8Srgb;
     swapchain = Swapchain{physicalDevice, device, surface, requiredFormat};
     frameDatas = FrameDataContainer(device);
@@ -50,6 +61,10 @@ Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
         vk::CommandBufferAllocateInfo{.commandPool = commandPool.get(),
                                       .level = vk::CommandBufferLevel::ePrimary,
                                       .commandBufferCount = static_cast<uint32_t>(swapchain.size())});
+}
+
+void Engine::initVertexBuffer()
+{
     // vertex buffer
     vertices = {Vertex{
                     .position = {-0.5, -0.5},
@@ -89,7 +104,10 @@ Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
 
         device.unmapMemory(vertexBufferMemory.get());
     }
+}
 
+void Engine::initShaderObjects()
+{
     // shader object setup
     shaderObject = ShaderObject(device, "triangle.vert.spv", "triangle.frag.spv");
     shaderObject2 = ShaderObject(device, "triangle.vert.spv", "triangle.frag.spv");

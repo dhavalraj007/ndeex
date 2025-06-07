@@ -11,16 +11,19 @@ class Engine
 {
   public:
     Engine();
-
     ~Engine();
-
     void gameloop();
 
-    void processEvents();
-
   private:
-    void swapChainRecreate();
+    void processEvents();
     void onWindowResize(uint32_t width, uint32_t height);
+
+    void initCoreHandles();
+    void initSwapchain();
+    void initVertexBuffer();
+    void initShaderObjects();
+
+    void swapChainRecreate();
 
     struct FrameData
     {
