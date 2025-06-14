@@ -5,8 +5,6 @@ set(CMAKE_CXX_STANDARD 23)
 include(cmake/CPM.cmake)
 include(CMakeHelpers.cmake)
 
-
-
 find_package(Vulkan REQUIRED)
 
 CPMAddPackage(
@@ -17,12 +15,26 @@ CPMAddPackage(
         "SDL_STATIC ON"
 )
 
+CPMAddPackage(
+  NAME vma
+  GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+  GIT_TAG v3.3.0
+)
+
 add_shaders(shaders src/triangle.vert src/triangle.frag)
 
-add_executable(ndeex src/main.cpp src/Vulkan.cpp src/Engine.cpp src/helpers_vulkan.cpp src/ShaderObject.cpp)
+add_executable(ndeex 
+              src/main.cpp
+              src/Vulkan.cpp 
+              src/Engine.cpp 
+              src/helpers_vulkan.cpp 
+              src/ShaderObject.cpp 
+              src/vma/Vma.cpp 
+              src/vma/Buffer.cpp
+              src/vma/Allocator.cpp)
 add_dependencies(ndeex shaders)
 target_include_directories(ndeex PRIVATE src)
-target_link_libraries(ndeex PRIVATE Vulkan::Vulkan SDL3::SDL3-static opengl32 )
+target_link_libraries(ndeex PRIVATE Vulkan::Vulkan SDL3::SDL3-static GPUOpen::VulkanMemoryAllocator opengl32)
 
 
 

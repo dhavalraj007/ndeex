@@ -1,7 +1,6 @@
 #pragma once
 #include "Exception.hpp"
-#include "SDL3/SDL.h"
-#include "helpers_vulkan.hpp"
+#include "SDL3/SDL_error.h"
 #include <utility>
 
 namespace helpers
@@ -37,6 +36,21 @@ decltype(auto) SDL_CHECKTHROW_impl(const char *expressionStr, T &&expression)
     return std::forward<T>(expression);
 }
 } // namespace detail
+#define SDL_CHECKTHROW(expression) helpers::detail::SDL_CHECKTHROW_impl(#expression, expression)
+
+namespace detail
+{
+template <typename T>
+    requires std::is_convertible_v<T &&, bool>
+decltype(auto) CHECKTHROW_impl(const char *expressionStr, T &&expression)
+{
+    if (!expression)
+    {
+        throw Core::runtime_error("expression:{} failed! ", expressionStr);
+    }
+    return std::forward<T>(expression);
+}
+} // namespace detail
+#define CHECKTHROW(expression) helpers::detail::CHECKTHROW_impl(#expression, expression)
 
 } // namespace helpers
-#define SDL_CHECKTHROW(expression) helpers::detail::SDL_CHECKTHROW_impl(#expression, expression)

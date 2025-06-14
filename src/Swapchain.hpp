@@ -1,5 +1,5 @@
 #include "Vulkan.hpp"
-#include <helpers.hpp>
+#include "helpers_vulkan.hpp"
 #include <vector>
 
 class Swapchain
@@ -49,7 +49,8 @@ class Swapchain
         auto surfaceCaps = physicalDevice.getSurfaceCapabilitiesKHR(surface);
         // Make sure we don't exceed maxImageCount if it's not unlimited (value of
         // 0)
-        uint32_t desiredCount = surfaceCaps.minImageCount + 1;
+        constexpr auto maxAcquireWithoutPresent = 1;
+        uint32_t desiredCount = surfaceCaps.minImageCount + maxAcquireWithoutPresent;
         if (surfaceCaps.maxImageCount > 0)
         {
             desiredCount = std::min(desiredCount, surfaceCaps.maxImageCount);

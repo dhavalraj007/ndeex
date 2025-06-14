@@ -2,6 +2,7 @@
 #include "Exception.hpp"
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <utility>
 
 vk::Instance helpers::vulkan::create_instance(const std::string_view appName, uint32_t appVersion,
@@ -9,10 +10,6 @@ vk::Instance helpers::vulkan::create_instance(const std::string_view appName, ui
                                               std::vector<const char *> requiredInstanceExtensions,
                                               std::vector<const char *> requiredInstanceLayers)
 {
-    static vk::detail::DynamicLoader dl;
-    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
 
 #if defined(DEBUG)
     requiredInstanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -140,7 +137,6 @@ vk::Device helpers::vulkan::create_device(DeviceQueueSelection deviceQueue,
                                           .enabledExtensionCount = (uint32_t)requiredDeviceExtensions.size(),
                                           .ppEnabledExtensionNames = requiredDeviceExtensions.data()};
     vk::Device device = deviceQueue.physicalDevice.createDevice(deviceCreateInfo);
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
     return device;
 }
 std::optional<vk::SurfaceFormatKHR> helpers::vulkan::getSurfaceFormat(vk::PhysicalDevice physicalDevice,

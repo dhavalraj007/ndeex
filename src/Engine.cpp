@@ -1,8 +1,11 @@
 #include "Engine.hpp"
 #include "helpers_vulkan.hpp"
+#include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <optional>
-#include <span>
+#include <print>
+#include <vk_mem_alloc.h>
 
 namespace Core
 {
@@ -10,13 +13,19 @@ namespace Core
 Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
 {
     initCoreHandles();
+    initVMA();
     initSwapchain();
     initVertexBuffer();
     initShaderObjects();
+    clearColor = vk::ClearValue{std::array<float, 4>{0.5f, 0.2f, 0.2f, 1.0f}};
 }
 
 void Engine::initCoreHandles()
 {
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
+        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+
     std::vector<const char *> requiredExtensions;
     requiredExtensions.append_range(window.getRequiredInstanceExtensions());
     vkInstance = helpers::vulkan::create_instance("ndeex", 1, "ndeexEngine", 1, requiredExtensions, {});
@@ -43,7 +52,26 @@ void Engine::initCoreHandles()
         {physicalDevice, graphicsQueueFamilyIndex},
         {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_EXT_SHADER_OBJECT_EXTENSION_NAME},
         {});
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
+
     graphicsQueue = device.getQueue(graphicsQueueFamilyIndex, 0);
+}
+
+void Engine::initVMA()
+{
+    VmaVulkanFunctions vulkanFunctions = {};
+    vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
+    VmaAllocatorCreateInfo allocatorCreateInfo = {};
+    allocatorCreateInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_4;
+    allocatorCreateInfo.physicalDevice = physicalDevice;
+    allocatorCreateInfo.device = device;
+    allocatorCreateInfo.instance = vkInstance;
+    allocatorCreateInfo.pVulkanFunctions = &vulkanFunctions;
+
+    allocator = vma::Allocator{allocatorCreateInfo};
 }
 
 void Engine::initSwapchain()
@@ -67,44 +95,18 @@ void Engine::initSwapchain()
 void Engine::initVertexBuffer()
 {
     // vertex buffer
-    vertices = {Vertex{
-                    .position = {-0.5, -0.5},
-                    .color = {1.0, 0.0, 0.0},
-                },
-                Vertex{
-                    .position = {0.5, -0.5},
-                    .color = {0.0, 1.0, 0.0},
-                },
-                Vertex{
-                    .position = {0.0, 0.5},
-                    .color = {0.0, 0.0, 1.0},
-                }};
-    vertexBuffer = device.createBufferUnique(vk::BufferCreateInfo{
-        .size = sizeof(Vertex) * vertices.size(),
-        .usage = vk::BufferUsageFlagBits::eVertexBuffer,
-        .sharingMode = vk::SharingMode::eExclusive,
-        .queueFamilyIndexCount = 1,
-        .pQueueFamilyIndices = &graphicsQueueFamilyIndex,
-    });
-
-    auto [memIndex, allocSize] = helpers::vulkan::getMemoryIndexAndSizeForBuffer(
-        physicalDevice, device, vertexBuffer.get(),
-        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-    vertexBufferMemory = device.allocateMemoryUnique(vk::MemoryAllocateInfo{
-        .allocationSize = allocSize,
-        .memoryTypeIndex = memIndex,
-    });
-
-    device.bindBufferMemory(vertexBuffer.get(), vertexBufferMemory.get(), 0);
-    {
-
-        void *vertexMappedPtr = device.mapMemory(vertexBufferMemory.get(), 0, allocSize);
-
-        std::span v = vertices;
-        std::ranges::copy(std::as_writable_bytes(v), static_cast<std::byte *>(vertexMappedPtr));
-
-        device.unmapMemory(vertexBufferMemory.get());
-    }
+    vertexBuffer.vertices() = {Vertex{
+                                   .position = {-0.5, -0.5},
+                                   .color = {1.0, 0.0, 0.0},
+                               },
+                               Vertex{
+                                   .position = {0.5, -0.5},
+                                   .color = {0.0, 1.0, 0.0},
+                               },
+                               Vertex{
+                                   .position = {0.0, 0.5},
+                                   .color = {0.0, 0.0, 1.0},
+                               }};
 }
 
 void Engine::initShaderObjects()
@@ -158,26 +160,43 @@ Engine::~Engine()
     device.waitIdle();
 }
 
-std::optional<Engine::FrameData> Engine::beginFrame()
+Swapchain::RenderTarget *Engine::acquireRenderTarget(std::chrono::milliseconds timeout)
 {
     auto frameIndex = currentFrame % swapchain.size();
     auto &renderSync = renderSyncs[frameIndex];
     // wait for previous rendering on the same image be finished
-    if (device.waitForFences(1, &renderSync.fence_RenderFinished.get(), true, 1000) != vk::Result::eSuccess)
-        throw Core::runtime_error("waitForFences failed");
+    VULKAN_CHECKTHROW(device.waitForFences(1, &renderSync.fence_RenderFinished.get(), true, 1000));
+    VULKAN_CHECKTHROW(device.resetFences(1, &renderSync.fence_RenderFinished.get()));
 
-    auto renderTargetIndexResult =
-        swapchain.acquireNextRenderTarget(std::chrono::seconds{5}, renderSync.sem_ImageAcquired.get(), {});
-    if (!renderTargetIndexResult)
+    std::optional<uint32_t> renderTargetIndexResult{};
+
+    auto end = std::chrono::system_clock::now() + timeout;
+    while (std::chrono::system_clock::now() <= end)
     {
-        swapChainRecreate();
-        return std::nullopt;
+        renderTargetIndexResult =
+            swapchain.acquireNextRenderTarget(std::chrono::seconds{5}, renderSync.sem_ImageAcquired.get(), {});
+        if (!renderTargetIndexResult)
+        {
+            swapChainRecreate();
+            continue;
+        }
+        break;
     }
 
-    auto renderTargetIndex = renderTargetIndexResult.value();
-    // std::println("acquired Image index:{}", renderTargetIndex);
-    auto &renderTarget = swapchain.getRenderTarget(renderTargetIndex);
+    if (renderTargetIndexResult)
+        return &swapchain.getRenderTarget(renderTargetIndexResult.value());
+    else
+        return nullptr;
+}
 
+void Engine::beginRecording(vk::CommandBuffer cmd)
+{
+    cmd.reset(vk::CommandBufferResetFlagBits::eReleaseResources);
+    cmd.begin(vk::CommandBufferBeginInfo{.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+}
+
+void Engine::transitionToRender(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget)
+{
     vk::ImageMemoryBarrier imageBarrier{.srcAccessMask = vk::AccessFlagBits::eNone,
                                         .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                                         .oldLayout = vk::ImageLayout::eUndefined,
@@ -191,13 +210,17 @@ std::optional<Engine::FrameData> Engine::beginFrame()
                                                                       .levelCount = 1,
                                                                       .baseArrayLayer = 0,
                                                                       .layerCount = 1}};
+    cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                        vk::DependencyFlagBits{}, nullptr, nullptr, {imageBarrier});
+}
 
+void Engine::beginRendering(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget)
+{
     vk::RenderingAttachmentInfo colorAttachment{.imageView = renderTarget.imageView.get(),
                                                 .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
                                                 .loadOp = vk::AttachmentLoadOp::eClear,
                                                 .storeOp = vk::AttachmentStoreOp::eStore,
-                                                .clearValue =
-                                                    vk::ClearValue{std::array<float, 4>{0.5f, 0.5f, 0.2f, 1.0f}}};
+                                                .clearValue = clearColor};
 
     vk::RenderingInfo renderingInfo{
         .renderArea = {{0, 0}, {window.getInfo().width, window.getInfo().height}},
@@ -206,31 +229,19 @@ std::optional<Engine::FrameData> Engine::beginFrame()
         .pColorAttachments = &colorAttachment,
     };
 
-    auto &commandBuffer = commandBuffers[frameIndex];
-    commandBuffer->reset(vk::CommandBufferResetFlagBits::eReleaseResources);
-    commandBuffer->begin(vk::CommandBufferBeginInfo{});
-
-    commandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                                   vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::DependencyFlagBits{}, nullptr,
-                                   nullptr, {imageBarrier});
-
-    commandBuffer->beginRendering(renderingInfo);
-
-    return FrameData{commandBuffer.get(), renderTarget};
+    cmd.beginRendering(renderingInfo);
 }
-
-void Engine::endFrame(FrameData &frameData)
+void Engine::endRendering(vk::CommandBuffer cmd)
 {
-    auto frameIndex = currentFrame % swapchain.size();
-    auto &renderSync = renderSyncs[frameIndex];
-
-    frameData.commandBuffer.endRendering();
-
+    cmd.endRendering();
+}
+void Engine::transitionToPresent(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget)
+{
     vk::ImageMemoryBarrier presentBarrier{.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                                           .dstAccessMask = {},
                                           .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
                                           .newLayout = vk::ImageLayout::ePresentSrcKHR,
-                                          .image = frameData.renderTarget.imageHandle,
+                                          .image = renderTarget.imageHandle,
                                           .subresourceRange =
                                               vk::ImageSubresourceRange{.aspectMask = vk::ImageAspectFlagBits::eColor,
                                                                         .baseMipLevel = 0,
@@ -238,10 +249,17 @@ void Engine::endFrame(FrameData &frameData)
                                                                         .baseArrayLayer = 0,
                                                                         .layerCount = 1}};
 
-    frameData.commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                            vk::PipelineStageFlagBits::eBottomOfPipe, vk::DependencyFlagBits{}, nullptr,
-                                            nullptr, {presentBarrier});
-    frameData.commandBuffer.end();
+    cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eBottomOfPipe,
+                        vk::DependencyFlagBits{}, nullptr, nullptr, {presentBarrier});
+}
+void Engine::stopRecording(vk::CommandBuffer cmd)
+{
+    cmd.end();
+}
+void Engine::submitToQueue(vk::CommandBuffer cmd)
+{
+    auto frameIndex = currentFrame % swapchain.size();
+    auto &renderSync = renderSyncs[frameIndex];
 
     vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
     vk::SubmitInfo submitInfo{
@@ -249,17 +267,19 @@ void Engine::endFrame(FrameData &frameData)
         .pWaitSemaphores = &renderSync.sem_ImageAcquired.get(),
         .pWaitDstStageMask = &waitStage,
         .commandBufferCount = 1,
-        .pCommandBuffers = &frameData.commandBuffer,
+        .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &renderSync.sem_RenderFinished.get(),
     };
 
-    if (device.resetFences(1, &renderSync.fence_RenderFinished.get()) != vk::Result::eSuccess)
-        throw Core::runtime_error("failed to reset render fence");
-
     graphicsQueue.submit(submitInfo, renderSync.fence_RenderFinished.get());
-    swapchain.presentImage(graphicsQueue, frameData.renderTarget.imageIndex, renderSync.sem_RenderFinished.get());
-    currentFrame++;
+}
+
+void Engine::present(Swapchain::RenderTarget &renderTarget)
+{
+    auto frameIndex = currentFrame % swapchain.size();
+    auto &renderSync = renderSyncs[frameIndex];
+    swapchain.presentImage(graphicsQueue, renderTarget.imageIndex, renderSync.sem_RenderFinished.get());
 }
 
 void Engine::gameloop()
@@ -268,23 +288,59 @@ void Engine::gameloop()
     {
         processEvents();
 
-        auto res = beginFrame();
-        if (!res)
-            continue;
-        auto frameData = res.value();
-        auto &cmd = frameData.commandBuffer;
+        auto frameIndex = currentFrame % swapchain.size();
+        auto &renderSync = renderSyncs[frameIndex];
+        // test change vertex data
+        auto updateVertexPosition = [](Vertex &v, uint32_t frameCount, float radius = 0.5f) {
+            float angle = frameCount * 0.05f; // Radians per frame
+            v.position[0] = radius * std::cos(angle);
+            v.position[1] = radius * std::sin(angle);
+            v.position[2] = 0.0f; // Keep on XY plane
+        };
+        vertexBuffer.vertices().push_back(Vertex{.position = {0.5f, 0.5f}, .color = {0.5, 0.6, 0.7}});
+        updateVertexPosition(vertexBuffer.vertices().back(), currentFrame, 0.4);
+        bool updateVertexBuffer = true;
 
-        cmd.bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
-        shaderObject.setState(cmd);
-        shaderObject.bind(cmd);
-        cmd.draw(3, 1, 0, 0);
+        auto &renderTarget = *CHECKTHROW(acquireRenderTarget());
+        auto cmd = commandBuffers[frameIndex].get();
 
-        cmd.bindVertexBuffers(0, vertexBuffer.get(), vk::DeviceSize(0));
-        shaderObject2.setState(cmd);
-        shaderObject2.bind(cmd);
-        cmd.draw(3, 1, 0, 0);
+        {
+            beginRecording(cmd);
+            transitionToRender(cmd, renderTarget);
+            if (updateVertexBuffer)
+            {
+                std::vector<vk::Fence> fences;
+                for (auto &sync : renderSyncs)
+                {
+                    if (&sync != &renderSync)
+                        fences.push_back(sync.fence_RenderFinished.get());
+                }
+                VULKAN_CHECKTHROW(device.waitForFences(fences, true, UINT64_MAX));
+                vertexBuffer.commit(0, allocator, cmd);
+            }
 
-        endFrame(frameData);
+            {
+                beginRendering(cmd, renderTarget);
+
+                cmd.bindVertexBuffers(0, vertexBuffer.getBufferHandle(), vk::DeviceSize(0));
+                shaderObject.setPrimitiveTopology(vk::PrimitiveTopology::eTriangleFan);
+                shaderObject.setState(cmd);
+                shaderObject.bind(cmd);
+                cmd.draw(vertexBuffer.vertices().size(), 1, 0, 0);
+
+                cmd.bindVertexBuffers(0, vertexBuffer.getBufferHandle(), vk::DeviceSize(0));
+                shaderObject2.setPrimitiveTopology(vk::PrimitiveTopology::eTriangleFan);
+                shaderObject2.setState(cmd);
+                shaderObject2.bind(cmd);
+                cmd.draw(vertexBuffer.vertices().size(), 1, 0, 0);
+                endRendering(cmd);
+            }
+            transitionToPresent(cmd, renderTarget);
+            stopRecording(cmd);
+        }
+        submitToQueue(cmd);
+        present(renderTarget);
+        currentFrame++;
     }
 }
 

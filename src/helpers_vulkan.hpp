@@ -2,8 +2,6 @@
 #pragma once
 #include "Exception.hpp"
 #include <filesystem>
-#include <fstream>
-#include <ranges>
 #include <vector>
 
 #include "Vulkan.hpp"
@@ -34,6 +32,31 @@ inline vk::Bool32 debug_utils_messenger_callback(vk::DebugUtilsMessageSeverityFl
     return false;
 }
 #endif
+
+namespace detail
+{
+inline vk::Result VULKAN_CHECKTHROW_impl(const char *expressionStr, vk::Result result)
+{
+    if (result != vk::Result::eSuccess)
+    {
+        throw Core::runtime_error("Vulkan error:{} returned {}!", expressionStr, vk::to_string(result));
+    }
+    return result;
+}
+inline VkResult VULKAN_CHECKTHROW_impl(const char *expressionStr, VkResult result)
+{
+    if (result != VkResult::VK_SUCCESS)
+    {
+        throw Core::runtime_error("Vulkan error:{} returned {}!", expressionStr, vk::to_string(vk::Result(result)));
+    }
+    return result;
+}
+} // namespace detail
+
+#define VULKAN_CHECKTHROW(expression) helpers::vulkan::detail::VULKAN_CHECKTHROW_impl(#expression, expression)
+#define VULKAN_CHECKTHROW2(expressionStr, expression)                                                                  \
+    helpers::vulkan::detail::VULKAN_CHECKTHROW_impl(expressionStr, expression)
+
 vk::Instance create_instance(const std::string_view appName, uint32_t appVersion, const std::string_view engineName,
                              uint32_t engineVersion, std::vector<const char *> requiredInstanceExtensions,
                              std::vector<const char *> requiredInstanceLayers);

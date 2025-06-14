@@ -3,7 +3,7 @@
 #include "ShaderObject.hpp"
 #include "Swapchain.hpp"
 #include "Window.hpp"
-#include "helpers.hpp"
+#include "vma/VertexBuffer.hpp"
 
 namespace Core
 {
@@ -19,6 +19,7 @@ class Engine
     void onWindowResize(uint32_t width, uint32_t height);
 
     void initCoreHandles();
+    void initVMA();
     void initSwapchain();
     void initVertexBuffer();
     void initShaderObjects();
@@ -30,8 +31,16 @@ class Engine
         vk::CommandBuffer commandBuffer;
         Swapchain::RenderTarget &renderTarget;
     };
-    std::optional<FrameData> beginFrame();
-    void endFrame(FrameData &frameData);
+
+    Swapchain::RenderTarget *acquireRenderTarget(std::chrono::milliseconds timeout = std::chrono::seconds{1});
+    void beginRecording(vk::CommandBuffer cmd);
+    void transitionToRender(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget);
+    void beginRendering(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget);
+    void endRendering(vk::CommandBuffer cmd);
+    void transitionToPresent(vk::CommandBuffer cmd, Swapchain::RenderTarget &renderTarget);
+    void stopRecording(vk::CommandBuffer cmd);
+    void submitToQueue(vk::CommandBuffer cmd);
+    void present(Swapchain::RenderTarget &renderTarget);
 
     struct RenderSync
     {
@@ -53,8 +62,10 @@ class Engine
         void recreate(const size_t size);
     };
 
+    vk::ClearValue clearColor{};
     std::size_t currentFrame = 0;
-
+    vk::detail::DynamicLoader dl;
+    vma::Allocator allocator;
     Core::Window window;
     vk::Instance vkInstance;
     VkSurfaceKHR surface;
@@ -77,8 +88,7 @@ class Engine
         std::array<float, 2> position;
         std::array<float, 3> color;
     };
-    std::vector<Vertex> vertices;
-    vk::UniqueBuffer vertexBuffer;
+    vma::VertexBuffer<Vertex> vertexBuffer;
     vk::UniqueDeviceMemory vertexBufferMemory;
 };
 } // namespace Core
