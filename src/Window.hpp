@@ -1,85 +1,108 @@
 #pragma once
 
+#include "SDL3/SDL_video.h"
 #include <Windows.h>
 #undef min
 #include "Vulkan.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
-#include "Exception.hpp"
 #include "helpers.hpp"
 #include <expected>
 
-namespace Core {
-struct WindowCreateInfo {
-  uint32_t width;
-  uint32_t height;
-  std::string title;
+namespace Core
+{
+struct WindowCreateInfo
+{
+    uint32_t width;
+    uint32_t height;
+    std::string title;
 };
 
-class Window {
-public:
-  Window(WindowCreateInfo wci) : info(wci), closeRequested(false) {
-    SDL_CHECKTHROW(SDL_Init(SDL_INIT_VIDEO));
+class Window
+{
+  public:
+    Window(WindowCreateInfo wci) : info(wci), closeRequested(false)
+    {
+        SDL_CHECKTHROW(SDL_Init(SDL_INIT_VIDEO));
 
-    window = SDL_CHECKTHROW(SDL_CreateWindow(info.title.c_str(), info.width,
-                                             info.height, SDL_WINDOW_VULKAN));
-    SDL_CHECKTHROW(SDL_SetWindowResizable(window, true));
-  }
-
-  ~Window() {
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-  }
-
-  bool isCloseRequested() { return closeRequested; }
-
-  void clearScreen() {}
-
-  SDL_Event *pollAndProcessEvent() {
-    static SDL_Event event;
-    if (SDL_PollEvent(&event)) {
-      processEvent(&event);
-      return &event;
+        window = SDL_CHECKTHROW(SDL_CreateWindow(info.title.c_str(), info.width, info.height, SDL_WINDOW_VULKAN));
+        SDL_CHECKTHROW(SDL_SetWindowResizable(window, true));
     }
-    return nullptr;
-  }
 
-  void processEvent(SDL_Event *event) {
-    switch (event->type) {
-    case SDL_EVENT_QUIT:
-      closeRequested = true;
-      break;
-    case SDL_EVENT_WINDOW_RESIZED:
-      info.width = event->window.data1;
-      info.height = event->window.data2;
-      break;
+    ~Window()
+    {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
     }
-  }
 
-  VkSurfaceKHR createSurface(vk::Instance vkInstance) {
-    VkSurfaceKHR surface;
-    SDL_CHECKTHROW(
-        SDL_Vulkan_CreateSurface(window, vkInstance, nullptr, &surface));
-    return surface;
-  }
+    bool isCloseRequested()
+    {
+        return closeRequested;
+    }
 
-  WindowCreateInfo const &getInfo() { return info; }
+    void clearScreen()
+    {
+    }
 
-  void setExtent(uint32_t width, uint32_t height) {
-    info.width = width;
-    info.height = height;
-  }
+    SDL_Event *pollAndProcessEvent()
+    {
+        static SDL_Event event;
+        if (SDL_PollEvent(&event))
+        {
+            processEvent(&event);
+            return &event;
+        }
+        return nullptr;
+    }
 
-  std::span<char const *const> getRequiredInstanceExtensions() {
-    uint32_t count = 0;
-    char const *const *ptr = SDL_Vulkan_GetInstanceExtensions(&count);
-    return std::span{ptr, count};
-  }
+    void processEvent(SDL_Event *event)
+    {
+        switch (event->type)
+        {
+        case SDL_EVENT_QUIT:
+            closeRequested = true;
+            break;
+        case SDL_EVENT_WINDOW_RESIZED:
+            info.width = event->window.data1;
+            info.height = event->window.data2;
+            break;
+        }
+    }
 
-private:
-  WindowCreateInfo info;
-  SDL_Window *window;
-  bool closeRequested;
+    VkSurfaceKHR createSurface(vk::Instance vkInstance)
+    {
+        VkSurfaceKHR surface;
+        SDL_CHECKTHROW(SDL_Vulkan_CreateSurface(window, vkInstance, nullptr, &surface));
+        return surface;
+    }
+
+    WindowCreateInfo const &getInfo()
+    {
+        return info;
+    }
+
+    void setExtent(uint32_t width, uint32_t height)
+    {
+        info.width = width;
+        info.height = height;
+    }
+
+    std::span<char const *const> getRequiredInstanceExtensions()
+    {
+        uint32_t count = 0;
+        char const *const *ptr = SDL_Vulkan_GetInstanceExtensions(&count);
+        return std::span{ptr, count};
+    }
+
+    SDL_Window *getHandle()
+    {
+        return window;
+    }
+
+  private:
+    WindowCreateInfo info;
+    SDL_Window *window;
+    bool closeRequested;
 };
 } // namespace Core
