@@ -1,5 +1,9 @@
 #include "Engine.hpp"
+#include "Imgui.hpp"
+#include "helpers.hpp"
 #include "helpers_vulkan.hpp"
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -15,6 +19,7 @@ Engine::Engine() : window(Core::WindowCreateInfo{1024, 800, "ndeex"})
     initCoreHandles();
     initVMA();
     initSwapchain();
+    initImGui();
     initVertexBuffer();
     initShaderObjects();
     clearColor = vk::ClearValue{std::array<float, 4>{0.5f, 0.2f, 0.2f, 1.0f}};
@@ -69,6 +74,7 @@ void Engine::initVMA()
     allocatorCreateInfo.physicalDevice = physicalDevice;
     allocatorCreateInfo.device = device;
     allocatorCreateInfo.instance = vkInstance;
+
     allocatorCreateInfo.pVulkanFunctions = &vulkanFunctions;
 
     allocator = vma::Allocator{allocatorCreateInfo};
@@ -90,6 +96,22 @@ void Engine::initSwapchain()
         vk::CommandBufferAllocateInfo{.commandPool = commandPool.get(),
                                       .level = vk::CommandBufferLevel::ePrimary,
                                       .commandBufferCount = static_cast<uint32_t>(swapchain.size())});
+}
+
+void Engine::initImGui()
+{
+    imgui.init(DearImgui::InitInfo{
+        .instance = vkInstance,
+        .physicalDevice = physicalDevice,
+        .device = device,
+        .graphicsQueueFamilyIndex = graphicsQueueFamilyIndex,
+        .graphicsQueue = graphicsQueue,
+        .imageCount = 2,
+        .sampleCount = vk::SampleCountFlagBits::e1,
+        .descriptorPoolSize = 2,
+        .window = window.getHandle(),
+        .format = swapchain.getFormat(),
+    });
 }
 
 void Engine::initVertexBuffer()
@@ -162,8 +184,7 @@ Engine::~Engine()
 
 Swapchain::RenderTarget *Engine::acquireRenderTarget(std::chrono::milliseconds timeout)
 {
-    auto frameIndex = currentFrame % swapchain.size();
-    auto &renderSync = renderSyncs[frameIndex];
+    auto &renderSync = getFrameRenderSync();
     // wait for previous rendering on the same image be finished
     VULKAN_CHECKTHROW(device.waitForFences(1, &renderSync.fence_RenderFinished.get(), true, 1000));
     VULKAN_CHECKTHROW(device.resetFences(1, &renderSync.fence_RenderFinished.get()));
@@ -258,8 +279,7 @@ void Engine::stopRecording(vk::CommandBuffer cmd)
 }
 void Engine::submitToQueue(vk::CommandBuffer cmd)
 {
-    auto frameIndex = currentFrame % swapchain.size();
-    auto &renderSync = renderSyncs[frameIndex];
+    auto &renderSync = getFrameRenderSync();
 
     vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
     vk::SubmitInfo submitInfo{
@@ -277,8 +297,7 @@ void Engine::submitToQueue(vk::CommandBuffer cmd)
 
 void Engine::present(Swapchain::RenderTarget &renderTarget)
 {
-    auto frameIndex = currentFrame % swapchain.size();
-    auto &renderSync = renderSyncs[frameIndex];
+    auto &renderSync = getFrameRenderSync();
     swapchain.presentImage(graphicsQueue, renderTarget.imageIndex, renderSync.sem_RenderFinished.get());
 }
 
@@ -288,8 +307,7 @@ void Engine::gameloop()
     {
         processEvents();
 
-        auto frameIndex = currentFrame % swapchain.size();
-        auto &renderSync = renderSyncs[frameIndex];
+        auto &renderSync = getFrameRenderSync();
         // test change vertex data
         auto updateVertexPosition = [](Vertex &v, uint32_t frameCount, float radius = 0.5f) {
             float angle = frameCount * 0.05f; // Radians per frame
@@ -297,28 +315,23 @@ void Engine::gameloop()
             v.position[1] = radius * std::sin(angle);
             v.position[2] = 0.0f; // Keep on XY plane
         };
-        vertexBuffer.vertices().push_back(Vertex{.position = {0.5f, 0.5f}, .color = {0.5, 0.6, 0.7}});
-        updateVertexPosition(vertexBuffer.vertices().back(), currentFrame, 0.4);
+
         bool updateVertexBuffer = true;
 
         auto &renderTarget = *CHECKTHROW(acquireRenderTarget());
-        auto cmd = commandBuffers[frameIndex].get();
+        auto cmd = getFrameCommandBuffer();
 
+        imgui.newFrame();
         {
             beginRecording(cmd);
             transitionToRender(cmd, renderTarget);
+
             if (updateVertexBuffer)
             {
-                std::vector<vk::Fence> fences;
-                for (auto &sync : renderSyncs)
-                {
-                    if (&sync != &renderSync)
-                        fences.push_back(sync.fence_RenderFinished.get());
-                }
-                VULKAN_CHECKTHROW(device.waitForFences(fences, true, UINT64_MAX));
+                VULKAN_CHECKTHROW(
+                    device.waitForFences(getPrevFrameRenderSync().fence_RenderFinished.get(), true, UINT64_MAX));
                 vertexBuffer.commit(0, allocator, cmd);
             }
-
             {
                 beginRendering(cmd, renderTarget);
 
@@ -335,9 +348,46 @@ void Engine::gameloop()
                 cmd.draw(vertexBuffer.vertices().size(), 1, 0, 0);
                 endRendering(cmd);
             }
+
+            {
+
+                vk::RenderingAttachmentInfo colorAttachment{.imageView = renderTarget.imageView.get(),
+                                                            .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+                                                            .loadOp = vk::AttachmentLoadOp::eLoad,
+                                                            .storeOp = vk::AttachmentStoreOp::eStore,
+                                                            .clearValue = clearColor};
+
+                vk::RenderingInfo renderingInfo{
+                    .renderArea = {{0, 0}, {window.getInfo().width, window.getInfo().height}},
+                    .layerCount = 1,
+                    .colorAttachmentCount = 1,
+                    .pColorAttachments = &colorAttachment,
+                };
+
+                ImGui::ShowDemoWindow();
+                ImGui::Begin("control");
+                for (std::string str = "pos 0"; auto &vertex : vertexBuffer.vertices())
+                {
+                    ImGui::SliderFloat2(str.c_str(), vertex.position.data(), -2.f, +2.f);
+                    str.back()++;
+                }
+                ImGui::End();
+
+                if (updateVertexBuffer)
+                {
+                    VULKAN_CHECKTHROW(
+                        device.waitForFences(getPrevFrameRenderSync().fence_RenderFinished.get(), true, UINT64_MAX));
+                    vertexBuffer.commit(0, allocator, cmd);
+                }
+
+                cmd.beginRendering(renderingInfo);
+                imgui.render(cmd);
+                cmd.endRendering();
+            }
             transitionToPresent(cmd, renderTarget);
             stopRecording(cmd);
         }
+
         submitToQueue(cmd);
         present(renderTarget);
         currentFrame++;
@@ -357,6 +407,7 @@ void Engine::processEvents()
         default:
             break;
         }
+        ImGui_ImplSDL3_ProcessEvent(event);
     }
 }
 

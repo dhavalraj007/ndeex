@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Imgui.hpp"
 #include "ShaderObject.hpp"
 #include "Swapchain.hpp"
 #include "Window.hpp"
@@ -21,16 +22,11 @@ class Engine
     void initCoreHandles();
     void initVMA();
     void initSwapchain();
+    void initImGui();
     void initVertexBuffer();
     void initShaderObjects();
 
     void swapChainRecreate();
-
-    struct FrameData
-    {
-        vk::CommandBuffer commandBuffer;
-        Swapchain::RenderTarget &renderTarget;
-    };
 
     Swapchain::RenderTarget *acquireRenderTarget(std::chrono::milliseconds timeout = std::chrono::seconds{1});
     void beginRecording(vk::CommandBuffer cmd);
@@ -62,8 +58,26 @@ class Engine
         void recreate(const size_t size);
     };
 
-    vk::ClearValue clearColor{};
+    RenderSync &getFrameRenderSync()
+    {
+        return renderSyncs.at(currentFrame % swapchain.size());
+    }
+    RenderSync &getPrevFrameRenderSync()
+    {
+        return renderSyncs.at((currentFrame + swapchain.size() - 1) % swapchain.size());
+    }
+    vk::CommandBuffer getFrameCommandBuffer()
+    {
+        return commandBuffers.at(currentFrame % swapchain.size()).get();
+    }
+    vk::CommandBuffer getPrevFrameCommandBuffer()
+    {
+        return commandBuffers.at((currentFrame + swapchain.size() - 1) % swapchain.size()).get();
+    }
+
     std::size_t currentFrame = 0;
+
+    vk::ClearValue clearColor{};
     vk::detail::DynamicLoader dl;
     vma::Allocator allocator;
     Core::Window window;
@@ -77,6 +91,7 @@ class Engine
     vk::Device device;
     vk::Queue graphicsQueue;
     Swapchain swapchain;
+    DearImgui imgui;
     RenderSyncContainer renderSyncs;
     vk::UniqueCommandPool commandPool;
     std::vector<vk::UniqueCommandBuffer> commandBuffers;
